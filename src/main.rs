@@ -1,6 +1,35 @@
+#![deny(
+rust_2018_idioms,
+unused_must_use,
+clippy::nursery,
+clippy::pedantic,
+clippy::perf,
+clippy::correctness,
+clippy::dbg_macro,
+clippy::else_if_without_else,
+clippy::empty_drop,
+clippy::empty_structs_with_brackets,
+clippy::expect_used,
+clippy::if_then_some_else_none,
+clippy::multiple_inherent_impl,
+clippy::panic,
+clippy::print_stderr,
+clippy::print_stdout,
+clippy::same_name_method,
+clippy::string_to_string,
+clippy::todo,
+clippy::try_err,
+clippy::unimplemented,
+clippy::unnecessary_self_imports,
+clippy::unreachable,
+clippy::unwrap_used,
+clippy::wildcard_enum_match_arm
+)]
+
+
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use clap::Parser;
@@ -18,7 +47,7 @@ fn main() -> anyhow::Result<()> {
     let repositories = discover_repositories(&root, args.recursive, &args.include, &args.exclude)?;
     let repositories = validate_repositories(repositories);
     let logs = repositories.iter().map(|r| read_git_log(&root, r)).collect::<anyhow::Result<Vec<_>>>()?;
-    write_gource_log(logs.into_iter().flatten().collect(), args.output, aliases)
+    write_gource_log(logs.into_iter().flatten().collect(), args.output, &aliases)
 }
 
 #[derive(Debug, Serialize)]
@@ -37,7 +66,7 @@ struct GourceLogFormat {
 }
 
 impl GourceLogFormat {
-    fn try_from_delta(root_path: &PathBuf, repo: &Repository, commit: &Commit, delta: DiffDelta) -> anyhow::Result<Option<Self>> {
+    fn try_from_delta(root_path: &PathBuf, repo: &Repository, commit: &Commit<'_>, delta: &'_ DiffDelta<'_>) -> anyhow::Result<Option<Self>> {
 
         // Using the root path, determine the relative path to the repository
         let relative = repo.path().strip_prefix(root_path).map_err(|_| anyhow!("Unable to determine relative path for {:?}", repo.path()))?.parent().ok_or_else(|| anyhow!("Git repo has no parent path? {:?}", repo.path()))?;
@@ -47,9 +76,9 @@ impl GourceLogFormat {
         let r#type = match delta.status() {
             Delta::Added => GourceActionType::A,
             Delta::Deleted => GourceActionType::D,
-            Delta::Modified => GourceActionType::M,
-            Delta::Renamed => GourceActionType::M,
-            Delta::Copied => GourceActionType::M,
+            Delta::Modified |
+            Delta::Renamed |
+            Delta::Copied |
             Delta::Typechange => GourceActionType::M,
             // These don't change the tree so they're NOPs
             Delta::Untracked |
@@ -61,7 +90,7 @@ impl GourceLogFormat {
         let path = delta.new_file().path().ok_or_else(|| anyhow!("Unable to parse git log for {:?}", commit))?.to_str().ok_or_else(|| anyhow!("Unable to parse git log for {:?}", commit))?.to_string();
         let file = format!("root/{}/{}", relative.to_str().ok_or_else(|| anyhow!("Unable to parse git path for {:?}", relative))?, path);
 
-        Ok(Some(GourceLogFormat {
+        Ok(Some(Self {
             timestamp,
             username,
             r#type,
@@ -107,7 +136,7 @@ fn validate_aliases(aliases: &[String]) -> anyhow::Result<HashMap<String, String
     Ok(validated_aliases)
 }
 
-fn discover_repositories(root: &PathBuf, recursive: bool, include: &[String], exclude: &[String]) -> anyhow::Result<Vec<PathBuf>> {
+fn discover_repositories(root: &Path, recursive: bool, include: &[String], exclude: &[String]) -> anyhow::Result<Vec<PathBuf>> {
     let mut repositories = Vec::new();
 
     for entry in root.read_dir()?.collect::<Result<Vec<_>, _>>()? {
@@ -120,13 +149,12 @@ fn discover_repositories(root: &PathBuf, recursive: bool, include: &[String], ex
         // Is this potentially a git repository?
         if entry.file_name().to_str().ok_or_else(|| anyhow!("Unable to read path {:?}", entry))? == ".git" {
             // Remember the path to this repository
-            repositories.push(root.clone());
+            repositories.push(root.to_path_buf());
             continue;
-        } else {
-            if recursive {
-                let mut sub_repositories = discover_repositories(&entry.path(), recursive, include, exclude)?;
-                repositories.append(&mut sub_repositories);
-            }
+        }
+        if recursive {
+            let mut sub_repositories = discover_repositories(&entry.path(), recursive, include, exclude)?;
+            repositories.append(&mut sub_repositories);
         }
     }
 
@@ -172,7 +200,7 @@ fn read_git_log(root_path: &PathBuf, path: &PathBuf) -> anyhow::Result<Vec<Gourc
     let mut logs: Vec<GourceLogFormat> = Vec::new();
     let repo = Repository::open(path)?;
     let mut revwalk = repo.revwalk()?;
-    revwalk.push_head().context(format!("Processing {:?}", path))?;
+    revwalk.push_head().context(format!("Processing {path:?}"))?;
     revwalk.set_sorting(git2::Sort::TIME)?;
 
     for revision in revwalk {
@@ -182,14 +210,14 @@ fn read_git_log(root_path: &PathBuf, path: &PathBuf) -> anyhow::Result<Vec<Gourc
         };
 
         let commit = repo.find_commit(revision)?;
-        logs.append(&mut compute_diff(root_path, &repo, commit)?);
+        logs.append(&mut compute_diff(root_path, &repo, &commit)?);
     }
 
     Ok(logs)
 }
 
 /// Compute the diff between two trees and return a list of changes
-fn compute_diff(root_path: &PathBuf, repo: &Repository, commit: Commit) -> anyhow::Result<Vec<GourceLogFormat>> {
+fn compute_diff(root_path: &PathBuf, repo: &Repository, commit: &Commit<'_>) -> anyhow::Result<Vec<GourceLogFormat>> {
     let a = if commit.parents().len() == 1 {
         let parent = commit.parent(0)?;
         Some(parent.tree()?)
@@ -199,22 +227,22 @@ fn compute_diff(root_path: &PathBuf, repo: &Repository, commit: Commit) -> anyho
 
     let b = commit.tree()?;
     let diff = repo.diff_tree_to_tree(a.as_ref(), Some(&b), None)?;
-    Ok(diff.deltas().filter_map(|d| GourceLogFormat::try_from_delta(root_path, repo, &commit, d).unwrap_or_else(|e| {
+    Ok(diff.deltas().filter_map(|d| GourceLogFormat::try_from_delta(root_path, repo, commit, &d).unwrap_or_else(|e| {
         error!("{e}");
         None
     })).collect::<Vec<_>>())
 }
 
-fn write_gource_log(mut logs: Vec<GourceLogFormat>, output_file: Option<String>, aliases: HashMap<String, String>) -> anyhow::Result<()> {
+fn write_gource_log(mut logs: Vec<GourceLogFormat>, output_file: Option<String>, aliases: &HashMap<String, String>) -> anyhow::Result<()> {
     // First we need to sort the logs by timestamp, we'll use unstable to save on memory
     logs.sort_unstable_by_key(|log| log.timestamp);
 
     // Now we need to apply the aliases
-    logs.iter_mut().for_each(|log| {
+    for log in &mut logs {
         if let Some(alias) = aliases.get(&log.username) {
             log.username = alias.to_string();
         }
-    });
+    }
 
     // Choose the output stream
     let output_stream: Box<dyn Write> = match output_file {
