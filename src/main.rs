@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 fn main() -> anyhow::Result<()> {
     SimpleLogger::new().init()?;
     let args = ClapArguments::parse();
-    let root = PathBuf::from(&*shellexpand::tilde(&args.path));
+    let root = PathBuf::from(&*shellexpand::tilde(&args.path)).canonicalize()?;
     let aliases = validate_aliases(&args.alias)?;
     let repositories = discover_repositories(&root, args.recursive, &args.include, &args.exclude)?;
     let repositories = validate_repositories(repositories);
@@ -78,7 +78,12 @@ impl GourceLogFormat {
         let relative = repo
             .path()
             .strip_prefix(root_path)
-            .map_err(|_| anyhow!("Unable to determine relative path for {:?}", repo.path()))?
+            .map_err(|e| {
+                anyhow!(
+                    "Unable to determine relative path for {:?}: {e}",
+                    repo.path()
+                )
+            })?
             .parent()
             .ok_or_else(|| anyhow!("Git repo has no parent path? {:?}", repo.path()))?;
 
@@ -113,13 +118,18 @@ impl GourceLogFormat {
             .to_str()
             .ok_or_else(|| anyhow!("Unable to parse git log for {:?}", commit))?
             .to_string();
-        let file = format!(
-            "root/{}/{}",
-            relative
-                .to_str()
-                .ok_or_else(|| anyhow!("Unable to parse git path for {:?}", relative))?,
-            path
-        );
+
+        let file = if relative.as_os_str() == "" {
+            format!("root/{path}",)
+        } else {
+            format!(
+                "root/{}/{}",
+                relative
+                    .to_str()
+                    .ok_or_else(|| anyhow!("Unable to parse git path for {:?}", relative))?,
+                path
+            )
+        };
 
         Ok(Some(Self {
             timestamp,
@@ -165,7 +175,7 @@ struct ClapArguments {
 
     #[arg(
         long,
-        help = "Add an alias for a user, format it <GIT_USERNAME>::<GOURCE_USERNAME>, you can specify this option multiple times"
+        help = "Add an alias for a user, format is <GIT_USERNAME>::<GOURCE_USERNAME>, you can specify this option multiple times"
     )]
     alias: Vec<String>,
 }
