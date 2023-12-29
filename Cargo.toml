@@ -1,0 +1,17 @@
+[package]
+name = "rource"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+git2 = "0.18.1"
+serde = { version = "1.0.193", features = ["derive"] }
+csv = "1.3.0"
+chrono = { version = "0.4.31", features = ["serde"] }
+clap = { version = "4.4.12", features = ["derive"] }
+anyhow = "1.0.77"
+shellexpand = { version = "3.1.0", features = ["tilde", "path"] }
+log = "0.4.20"
+simple_logger = { version = "4.3.0", features = ["colors", "timestamps", "stderr"] }
