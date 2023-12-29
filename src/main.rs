@@ -154,7 +154,7 @@ impl GourceLogFormat {
 }
 
 #[derive(Parser)]
-#[command(author = "Adam Leyshon", version = "0.2.0", about, long_about = None)]
+#[command(author = "Adam Leyshon", version = "0.2.1", about, long_about = None)]
 struct ClapArguments {
     #[arg(short, long, help = "The path to the git repository/repositories")]
     path: String,

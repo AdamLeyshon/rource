@@ -1,6 +1,6 @@
 [package]
 name = "rource"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["WelshProgrammer"]
 description = "A tool to help you generate a Gource log for all your repositories"

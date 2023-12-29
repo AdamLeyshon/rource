@@ -1,8 +1,15 @@
 # Rource
 
+## What is it?
 Rource is a tool to generate a Gource log file from a git repository or a directory containing git repositories.
 
-You can check out Gource here: https://github.com/acaudwell/Gource
+If you don't know what Gource is you can check it out here: https://github.com/acaudwell/Gource
+
+It's a tool to generate a cool visualisation from a log file, usually a Source Control system, like this:
+
+[![Gource Video](gource.png)](https://youtu.be/NjUuAuBcoqs)
+
+## How do I use it?
 
 Give rource a path to a git repository or a directory containing repositories and it will generate a Gource log file.
 
@@ -39,7 +46,17 @@ Generate log for this repository and output to a file:
 rource -p ./ -o output.txt
 ```
 
-## Building/Installing from source
+## How do I get it?
+
+### Install from [crates.io](https://crates.io/)
+
+It should be as simple as:
+
+```shell
+cargo install rource
+```
+
+### Building/Installing from source
 
 ```shell
 git clone https://github.com/AdamLeyshon/rource.git 
@@ -52,7 +69,7 @@ cargo install --path .
 cargo build --release
 ```
 
-## Command line options
+## Available options
 
     Usage: rource [OPTIONS] --path <PATH>
     
