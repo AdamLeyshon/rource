@@ -20,8 +20,15 @@ Scan a folder for git repositories recursive, apply two aliases and output to a 
 
 Scan a folder for git repositories recursive, apply two aliases and pipe directly to Gource:
 
-    rource -- -p ~/source/my-github-org -r | gource
+    rource -p ~/source/my-github-org -r | gource
 
+Generate log for a single repository and pipe directly to Gource:
+
+    rource -p ~/source/my-github-org/my-repo | gource
+
+Generate log for this repository and output to a file:
+
+    rource -p ./ -o output.txt
 
 
 ## Building from source
