@@ -20,21 +20,25 @@ Scan a folder for git repositories recursive, apply two aliases and output to a 
 
 Scan a folder for git repositories recursive, apply two aliases and pipe directly to Gource:
 
-    rource -p ~/source/my-github-org -r | gource
+    rource -p ~/source/my-github-org -r | gource - --log-format custom
 
 Generate log for a single repository and pipe directly to Gource:
 
-    rource -p ~/source/my-github-org/my-repo | gource
+    rource -p ~/source/my-github-org/my-repo | gource - --log-format custom
 
 Generate log for this repository and output to a file:
 
     rource -p ./ -o output.txt
 
-
-## Building from source
+## Building/Installing from source
 
     git clone https://github.com/AdamLeyshon/rource.git 
     cd rource
+
+    # You can either install it
+    cargo install --path .
+
+    # Or build it, the binary will be in ./target/release/rource
     cargo build --release
 
 ## Command line options

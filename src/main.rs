@@ -39,8 +39,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn main() -> anyhow::Result<()> {
-    SimpleLogger::new().init()?;
+    reset_pipe();
     let args = ClapArguments::parse();
+    let mut logger = SimpleLogger::new();
+    if args.no_logging {
+        logger = logger.with_level(log::LevelFilter::Off);
+    }
+    logger.init()?;
     let root = PathBuf::from(&*shellexpand::tilde(&args.path)).canonicalize()?;
     let aliases = validate_aliases(&args.alias)?;
     let repositories = discover_repositories(&root, args.recursive, &args.include, &args.exclude)?;
@@ -51,6 +56,14 @@ fn main() -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?;
     write_gource_log(logs.into_iter().flatten().collect(), args.output, &aliases)
 }
+
+#[cfg(unix)]
+fn reset_pipe() {
+    sigpipe::reset();
+}
+
+#[cfg(not(unix))]
+fn reset_pipe() {}
 
 #[derive(Debug, Serialize)]
 enum GourceActionType {
@@ -141,7 +154,7 @@ impl GourceLogFormat {
 }
 
 #[derive(Parser)]
-#[command(author = "Adam Leyshon", version = "0.0.1", about, long_about = None)]
+#[command(author = "Adam Leyshon", version = "0.2.0", about, long_about = None)]
 struct ClapArguments {
     #[arg(short, long, help = "The path to the git repository/repositories")]
     path: String,
@@ -178,6 +191,9 @@ struct ClapArguments {
         help = "Add an alias for a user, format is <GIT_USERNAME>::<GOURCE_USERNAME>, you can specify this option multiple times"
     )]
     alias: Vec<String>,
+
+    #[arg(long, help = "Disable logging, useful when piping directly to Gource")]
+    no_logging: bool,
 }
 
 fn validate_aliases(aliases: &[String]) -> anyhow::Result<HashMap<String, String>> {
