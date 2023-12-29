@@ -2,6 +2,14 @@
 name = "rource"
 version = "0.2.0"
 edition = "2021"
+authors = ["WelshProgrammer"]
+description = "A tool to help you generate a Gource log for all your repositories"
+license = "Apache-2.0"
+readme = "readme.md"
+repository = "https://github.com/AdamLeyshon/rource"
+homepage = "https://www.thecodecache.net"
+keywords = ["gource", "git", "log", "generator", "cli"]
+categories = ["development-tools", "command-line-utilities", "parsing"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
