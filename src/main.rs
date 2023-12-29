@@ -192,7 +192,10 @@ struct ClapArguments {
     )]
     alias: Vec<String>,
 
-    #[arg(long, help = "Disable logging, useful when piping directly to Gource")]
+    #[arg(
+        long,
+        help = "Disable logging, useful when piping directly tools that don't like stderr"
+    )]
     no_logging: bool,
 }
 
