@@ -26,35 +26,129 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use anyhow::{anyhow, Context};
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+mod cli;
+mod consts;
+mod git_stuff;
+mod serde;
+mod structs;
+mod validation;
+
+use crate::serde::DiskLogReader;
+use anyhow::Context;
 use clap::Parser;
+use cli::ClapArguments;
 use csv::QuoteStyle;
-use git2::{Commit, Delta, DiffDelta, Repository};
-use log::{error, warn};
-use serde::Serialize;
-use simple_logger::SimpleLogger;
+use ext_sort::buffer::mem::MemoryLimitedBufferBuilder;
+use ext_sort::{ExternalSorter, ExternalSorterBuilder};
+
+use crate::consts::{DEFAULT_PROGRESS_STYLE, DEFAULT_SPINNER_STYLE, DEFAULT_SPINNER_TICK_STYLE};
+use crate::structs::{GourceLogConfig, MergeSortConfig};
+use consts::TEMPORARY_LOG_FILENAME;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif_log_bridge::LogWrapper;
+use log::warn;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
+use std::{fs, io};
+use structs::GourceLogFormat;
 
 fn main() -> anyhow::Result<()> {
     reset_pipe();
     let args = ClapArguments::parse();
-    let mut logger = SimpleLogger::new();
-    if args.no_logging {
-        logger = logger.with_level(log::LevelFilter::Off);
+
+    // Setup logging
+    let mut logger = env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("info")
+            .filter("ext_sort=warn"),
+    );
+
+    // If we're writing to stdout, disable logging
+    if args.output.is_none() {
+        logger.filter_level(log::LevelFilter::Off);
     }
-    logger.init()?;
+
+    let logger = logger.build();
+
+    let multi = MultiProgress::new();
+    LogWrapper::new(multi.clone(), logger).try_init()?;
+
+    // Cleanup any previous runs if they exist
+    if Path::new(TEMPORARY_LOG_FILENAME).exists() {
+        fs::remove_file(TEMPORARY_LOG_FILENAME).context("Failed to remove temp file")?;
+    }
+
+    // Parse and validate the arguments, then discover the repositories
     let root = PathBuf::from(&*shellexpand::tilde(&args.path)).canonicalize()?;
-    let aliases = validate_aliases(&args.alias)?;
-    let repositories = discover_repositories(&root, args.recursive, &args.include, &args.exclude)?;
-    let repositories = validate_repositories(repositories);
+    let aliases = validation::validate_aliases(&args.alias)?;
+    let repositories =
+        validation::discover_repositories(&root, args.recursive, &args.include, &args.exclude)?;
+    let repositories = validation::validate_repositories(repositories);
+
+    #[allow(clippy::if_then_some_else_none)]
+    // Reason: We can't use ? inside a closure
+    let (merge_sort_config, locked_output_writer) = if args.use_merge_sort {
+        let config = MergeSortConfig::new(args.sort_chunk_size, args.temp_file_location)?;
+
+        let writer = Mutex::new(io::BufWriter::new(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(config.tmp_location.join(TEMPORARY_LOG_FILENAME))?,
+        ));
+
+        (Some(config), Some(writer))
+    } else {
+        (None, None)
+    };
+
     let logs = repositories
-        .iter()
-        .map(|r| read_git_log(&root, r))
+        .par_iter()
+        .map(|r| {
+            git_stuff::read_git_log(
+                &root,
+                r,
+                locked_output_writer.as_ref(),
+                &multi,
+                args.max_changeset_size,
+            )
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    write_gource_log(logs.into_iter().flatten().collect(), args.output, &aliases)
+
+    let temp_path = merge_sort_config.as_ref().map(|c| c.tmp_location.clone());
+
+    // Do the final sort and write out the log file
+    write_gource_log(
+        logs.into_iter().flatten().collect(),
+        &multi,
+        GourceLogConfig {
+            output_file: args.output,
+            aliases,
+            merge_sort_config,
+        },
+    )?;
+
+    // Cleanup if needed
+    let Some(path) = temp_path else { return Ok(()) };
+    let temp_file = path.join(TEMPORARY_LOG_FILENAME);
+    if !temp_file.exists() {
+        return Ok(());
+    }
+    // Remove the temporary file
+    fs::remove_file(temp_file)?;
+
+    // Hopefully that the last file in the directory
+    if path.read_dir()?.next().is_none() {
+        fs::remove_dir(path)?;
+    } else {
+        warn!("Temporary directory still contains files, not removing");
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -65,307 +159,79 @@ fn reset_pipe() {
 #[cfg(not(unix))]
 fn reset_pipe() {}
 
-#[derive(Debug, Serialize)]
-enum GourceActionType {
-    A,
-    M,
-    D,
-}
-
-#[derive(Debug, Serialize)]
-struct GourceLogFormat {
-    timestamp: DateTime<Utc>,
-    username: String,
-    r#type: GourceActionType,
-    file: String,
-}
-
-impl GourceLogFormat {
-    fn try_from_delta(
-        root_path: &PathBuf,
-        repo: &Repository,
-        commit: &Commit<'_>,
-        delta: &'_ DiffDelta<'_>,
-    ) -> anyhow::Result<Option<Self>> {
-        // Using the root path, determine the relative path to the repository
-        let relative = repo
-            .path()
-            .strip_prefix(root_path)
-            .map_err(|e| {
-                anyhow!(
-                    "Unable to determine relative path for {:?}: {e}",
-                    repo.path()
-                )
-            })?
-            .parent()
-            .ok_or_else(|| anyhow!("Git repo has no parent path? {:?}", repo.path()))?;
-
-        let timestamp = Utc.from_utc_datetime(
-            &NaiveDateTime::from_timestamp_opt(commit.time().seconds(), 0)
-                .ok_or_else(|| anyhow!("Unable to parse timestamp log for {:?}", commit))?,
-        );
-        let username = commit
-            .author()
-            .name()
-            .ok_or_else(|| anyhow!("Unable to parse git log for {:?}", commit))?
-            .to_string();
-        let r#type = match delta.status() {
-            Delta::Added => GourceActionType::A,
-            Delta::Deleted => GourceActionType::D,
-            Delta::Modified | Delta::Renamed | Delta::Copied | Delta::Typechange => {
-                GourceActionType::M
-            }
-            // These don't change the tree so they're NOPs
-            Delta::Untracked
-            | Delta::Unmodified
-            | Delta::Unreadable
-            | Delta::Conflicted
-            | Delta::Ignored => {
-                return Ok(None);
-            }
-        };
-        let path = delta
-            .new_file()
-            .path()
-            .ok_or_else(|| anyhow!("Unable to parse git log for {:?}", commit))?
-            .to_str()
-            .ok_or_else(|| anyhow!("Unable to parse git log for {:?}", commit))?
-            .to_string();
-
-        let file = if relative.as_os_str() == "" {
-            format!("root/{path}",)
-        } else {
-            format!(
-                "root/{}/{}",
-                relative
-                    .to_str()
-                    .ok_or_else(|| anyhow!("Unable to parse git path for {:?}", relative))?,
-                path
-            )
-        };
-
-        Ok(Some(Self {
-            timestamp,
-            username,
-            r#type,
-            file,
-        }))
-    }
-}
-
-#[derive(Parser)]
-#[command(author = "Adam Leyshon", version = "0.2.1", about, long_about = None)]
-struct ClapArguments {
-    #[arg(short, long, help = "The path to the git repository/repositories")]
-    path: String,
-
-    #[arg(
-        short,
-        long,
-        help = "Recursively search for repositories, by default all repositories in <PATH> will be included"
-    )]
-    recursive: bool,
-
-    #[arg(
-        requires = "recursive",
-        short,
-        long,
-        help = "Used with recursive, only process these repositories, cannot be used with --exclude"
-    )]
-    include: Vec<String>,
-
-    #[arg(
-        requires = "recursive",
-        conflicts_with = "include",
-        short,
-        long,
-        help = "Used with recursive, exclude these repositories from processing, cannot be used with --include"
-    )]
-    exclude: Vec<String>,
-
-    #[arg(short, long, help = "Output file, defaults to stdout")]
-    output: Option<String>,
-
-    #[arg(
-        long,
-        help = "Add an alias for a user, format is <GIT_USERNAME>::<GOURCE_USERNAME>, you can specify this option multiple times"
-    )]
-    alias: Vec<String>,
-
-    #[arg(
-        long,
-        help = "Disable logging, useful when piping directly tools that don't like stderr"
-    )]
-    no_logging: bool,
-}
-
-fn validate_aliases(aliases: &[String]) -> anyhow::Result<HashMap<String, String>> {
-    let mut validated_aliases: HashMap<String, String> = HashMap::with_capacity(aliases.len());
-    for alias in aliases {
-        let parts = alias.split("::").collect::<Vec<_>>();
-        if parts.len() != 2 {
-            return Err(anyhow!(
-                "Invalid alias format, expected <GIT_USERNAME>::<GOURCE_USERNAME>"
-            ));
-        }
-        validated_aliases.insert(parts[0].to_string(), parts[1].to_string());
-    }
-    Ok(validated_aliases)
-}
-
-/// Try to find potential git repositories in a directory
-fn discover_repositories(
-    root: &Path,
-    recursive: bool,
-    include: &[String],
-    exclude: &[String],
-) -> anyhow::Result<Vec<PathBuf>> {
-    let mut repositories = Vec::new();
-
-    for entry in root.read_dir()?.collect::<Result<Vec<_>, _>>()? {
-        if !entry.file_type()?.is_dir() {
-            // Skip non-directories
-            continue;
-        }
-
-        let entry_name = entry
-            .file_name()
-            .to_str()
-            .ok_or_else(|| anyhow!("Unable to read path {:?}", entry))?
-            .to_string();
-
-        // Assuming we're at the parent level before we recurse, check if we should skip this directory
-        if !exclude.is_empty() && exclude.contains(&entry_name) {
-            // Skip excluded directories
-            continue;
-        }
-        if !include.is_empty() && !include.contains(&entry_name) {
-            // Skip non-included directories
-            continue;
-        }
-
-        // After passing the include/exclude checks,
-        // Is this potentially a git repository?
-        if entry_name == ".git" {
-            // Push this as a potential repository
-            repositories.push(root.to_path_buf());
-
-            // Don't recurse into .git directories
-            continue;
-        }
-
-        if recursive {
-            let mut sub_repositories =
-                discover_repositories(&entry.path(), recursive, include, exclude)?;
-            repositories.append(&mut sub_repositories);
-        }
-    }
-
-    Ok(repositories)
-}
-
-/// Take a list of repository paths and validate them, returning the list repositories with the invalid ones removed
-fn validate_repositories(mut repositories: Vec<PathBuf>) -> Vec<PathBuf> {
-    repositories.retain(|path| {
-        let path = PathBuf::from(path);
-        match Repository::open(path.as_path()) {
-            Ok(r) => {
-                if r.head().is_err() {
-                    warn!("Skipping repository with no HEAD {:?}", path);
-                    return false;
-                }
-                if r.is_bare() {
-                    warn!("Skipping bare repository {:?}", path);
-                    return false;
-                }
-                if r.is_empty().unwrap_or(false) {
-                    warn!("Skipping empty repository {:?}", path);
-                    return false;
-                }
-                if r.head_detached().unwrap_or(false) {
-                    warn!("Skipping detached head repository {:?}", path);
-                    return false;
-                }
-                true
-            }
-            Err(e) => {
-                error!("Failed to open repository: {}", e);
-                false
-            }
-        }
-    });
-    repositories
-}
-
-/// Read the git log for a repository and parse into our struct
-fn read_git_log(root_path: &PathBuf, path: &PathBuf) -> anyhow::Result<Vec<GourceLogFormat>> {
-    let mut logs: Vec<GourceLogFormat> = Vec::new();
-    let repo = Repository::open(path)?;
-    let mut revwalk = repo.revwalk()?;
-    revwalk
-        .push_head()
-        .context(format!("Processing {path:?}"))?;
-    revwalk.set_sorting(git2::Sort::TIME)?;
-
-    for revision in revwalk {
-        let Ok(revision) = revision else {
-            error!("Failed to read revision: {:?}", revision);
-            continue;
-        };
-
-        let commit = repo.find_commit(revision)?;
-        logs.append(&mut compute_diff(root_path, &repo, &commit)?);
-    }
-
-    Ok(logs)
-}
-
-/// Compute the diff between two trees and return a list of changes
-fn compute_diff(
-    root_path: &PathBuf,
-    repo: &Repository,
-    commit: &Commit<'_>,
-) -> anyhow::Result<Vec<GourceLogFormat>> {
-    let a = if commit.parents().len() == 1 {
-        let parent = commit.parent(0)?;
-        Some(parent.tree()?)
-    } else {
-        None
-    };
-
-    let b = commit.tree()?;
-    let diff = repo.diff_tree_to_tree(a.as_ref(), Some(&b), None)?;
-    Ok(diff
-        .deltas()
-        .filter_map(|d| {
-            GourceLogFormat::try_from_delta(root_path, repo, commit, &d).unwrap_or_else(|e| {
-                error!("{e}");
-                None
-            })
-        })
-        .collect::<Vec<_>>())
+pub struct LogSource {
+    pub source: Box<dyn Iterator<Item = GourceLogFormat>>,
+    pub size_hint: u64,
 }
 
 /// Write out the changes we've accumulated to the target
 fn write_gource_log(
     mut logs: Vec<GourceLogFormat>,
+    progress_bar: &MultiProgress,
+    config: GourceLogConfig,
+) -> anyhow::Result<()> {
+    // Setup the progress bar
+    let merge_progress = progress_bar.add(ProgressBar::new_spinner());
+    merge_progress.set_style(
+        ProgressStyle::with_template(DEFAULT_SPINNER_STYLE)?.tick_chars(DEFAULT_SPINNER_TICK_STYLE),
+    );
+    merge_progress.set_prefix("Generating output");
+    merge_progress.enable_steady_tick(Duration::from_millis(100));
+    merge_progress.set_message("Merge and Sort");
+
+    // Do we need to do a merge sort?
+    let source = if let Some(ms_config) = config.merge_sort_config {
+        let mut reader = DiskLogReader::new(
+            &ms_config.tmp_location.join(TEMPORARY_LOG_FILENAME),
+            progress_bar,
+        )?;
+        let records = reader.record_count()?;
+
+        let sorter: ExternalSorter<GourceLogFormat, io::Error, MemoryLimitedBufferBuilder> =
+            ExternalSorterBuilder::new()
+                .with_tmp_dir(Path::new("./"))
+                .with_buffer(MemoryLimitedBufferBuilder::new(
+                    ms_config.chunk_size * 1024 * 1024,
+                ))
+                .build()?;
+
+        LogSource {
+            size_hint: records,
+            source: Box::new(sorter.sort(reader)?.flatten()),
+        }
+    } else {
+        // Sort in memory
+        logs.sort_unstable_by_key(|log| log.timestamp);
+        LogSource {
+            size_hint: logs.len() as u64,
+            source: Box::new(logs.into_iter()),
+        }
+    };
+
+    merge_progress.set_message("Gourcification");
+    write_to_output(source, config.output_file, &config.aliases, progress_bar)?;
+    merge_progress.finish_with_message("Done");
+
+    Ok(())
+}
+
+fn write_to_output(
+    source: LogSource,
     output_file: Option<String>,
     aliases: &HashMap<String, String>,
+    multi_progress: &MultiProgress,
 ) -> anyhow::Result<()> {
-    // Sort the logs by timestamp, we'll use unstable to save on memory
-    logs.sort_unstable_by_key(|log| log.timestamp);
+    let progress_bar = multi_progress.add(
+        ProgressBar::new(source.size_hint)
+            .with_style(ProgressStyle::with_template(DEFAULT_PROGRESS_STYLE)?),
+    );
 
-    // Apply any aliases
-    for log in &mut logs {
-        if let Some(alias) = aliases.get(&log.username) {
-            log.username = alias.to_string();
-        }
-    }
+    progress_bar.set_prefix("Writing Gource Log");
 
     // Set the output stream
     let output_stream: Box<dyn Write> = match output_file {
-        Some(path) => Box::new(std::fs::File::create(path)?),
-        None => Box::new(std::io::stdout()),
+        Some(path) => Box::new(fs::File::create(path)?),
+        None => Box::new(io::stdout()),
     };
 
     // Use CSV to write the logs using Serde
@@ -374,10 +240,15 @@ fn write_gource_log(
         .delimiter(b'|')
         .quote_style(QuoteStyle::Necessary)
         .from_writer(output_stream);
-    for log in logs {
+
+    for mut log in source.source {
+        // Apply any aliases
+        progress_bar.inc(1);
+        if let Some(alias) = aliases.get(&log.username) {
+            log.username = alias.to_string();
+        }
         writer.serialize(log)?;
     }
-    writer.flush()?;
-
-    Ok(())
+    progress_bar.finish_with_message("Done");
+    writer.flush().context("Failed to write output")
 }
