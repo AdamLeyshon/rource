@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "rource"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -766,9 +766,7 @@ dependencies = [
  "rand",
  "rayon",
  "serde",
- "serde_bytes",
  "serde_cbor",
- "serde_json",
  "shellexpand",
  "sigpipe",
 ]
@@ -802,15 +800,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_bytes"
-version = "0.11.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bb1879ea93538b78549031e2d54da3e901fd7e75f2e4dc758d760937b123d10"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "serde_cbor"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -829,17 +818,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.43",
-]
-
-[[package]]
-name = "serde_json"
-version = "1.0.108"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d1c7e3eac408d115102c4c24ad393e0821bb3a5df4d506a80f85f7a742a526b"
-dependencies = [
- "itoa",
- "ryu",
- "serde",
 ]
 
 [[package]]

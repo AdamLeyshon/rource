@@ -4,7 +4,7 @@ use clap::Parser;
 #[command(
     name = "Rource",
     author = "Adam Leyshon",
-    version = "0.3.0",
+    version = "0.3.1",
     about,
     long_about = "
 Rource! A tool to convert git logs into a format that can be used by Gource.
